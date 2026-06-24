@@ -277,6 +277,6 @@ aws ecr delete-repository \
 **Sagar SM**
 Cloud & DevOps Engineer | AWS | Kubernetes | Terraform | Jenkins
 
-- GitHub: [@appusagar077](https://github.com/appusagar077)
+- GitHub: [@sagar.smanjunath](https://github.com/sagar.smanjunath)
 - LinkedIn: [linkedin.com/in/sagar-sm](https://linkedin.com/in/sagar-sm)
 
