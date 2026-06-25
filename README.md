@@ -14,7 +14,8 @@ A fully containerized **Node.js Todo List application** deployed on **AWS ECS Fa
 
 This project walks through the complete lifecycle of deploying a Node.js web application to the cloud:
 
-- Writing a production-ready `Dockerfile`
+- Writing a production-ready `Dockerfile` with **multi-stage builds**
+- **Reducing Docker image size** by separating build and production stages
 - Building and tagging Docker images on an EC2 instance
 - Authenticating to AWS ECR using IAM Roles (no access keys)
 - Pushing the image to a private ECR repository
@@ -32,9 +33,10 @@ GitHub (Source Code)
    EC2 Instance  ◄──── IAM Role (ECR Access)
    (Build Server)
         │
-        │  docker build
+        │  docker build (multi-stage)
         ▼
      Docker Image
+     (optimized — prod deps only)
         │
         │  docker push
         ▼
@@ -53,6 +55,7 @@ GitHub (Source Code)
   CloudWatch Logs
   [Container Monitoring]
 ```
+
 <img width="1356" height="1158" alt="image" src="https://github.com/user-attachments/assets/4c4ef9b9-bb23-41e7-b8e9-5de937bce8fd" />
 
 ---
@@ -63,7 +66,7 @@ GitHub (Source Code)
 |-----------------------|----------------------------------------------|
 | Node.js + Express     | Backend web framework                        |
 | EJS                   | Server-side HTML templating                  |
-| Docker                | Containerization                             |
+| Docker (Multi-stage)  | Containerization with image size optimization|
 | AWS EC2               | Build server to create the Docker image      |
 | AWS IAM Role          | Secure, keyless authentication to ECR        |
 | AWS ECR               | Private Docker image registry                |
@@ -78,7 +81,7 @@ GitHub (Source Code)
 ```
 nodejs-aws-ecs-deployment/
 ├── app.js                   # Main Express application entry point
-├── Dockerfile               # Container build instructions
+├── Dockerfile               # Multi-stage container build instructions
 ├── docker-compose.yaml      # Local multi-container setup
 ├── package.json             # Node.js dependencies
 ├── package-lock.json        # Locked dependency versions
@@ -153,11 +156,70 @@ cd nodejs-aws-ecs-deployment
 # Build the Docker image
 docker build -t nodejs-todo-app .
 
-# Verify the image was created
+# Verify the image was created and check its size
 docker images
 ```
 
-### Step 6 — Create ECR Repository
+### Step 6 — Multi-Stage Docker Build & Image Size Optimization
+
+One of the key optimizations in this project is using a **multi-stage Dockerfile** to significantly reduce the final image size.
+
+**How it works:**
+
+- **Stage 1 (Builder)** — Uses the full Node.js alpine image, installs all dependencies (including devDependencies), and runs tests. This stage is only used during the build process.
+- **Stage 2 (Production)** — Starts from a fresh alpine image and runs `npm install --only=production`, skipping all dev dependencies like test frameworks and linters. Only production-ready files are copied from Stage 1.
+
+**Result:** The final image contains zero dev tooling — just what's needed to run the app. This translates to a noticeably smaller image, faster ECR push times, faster ECS pull times, and a reduced attack surface in production.
+
+```dockerfile
+# ── Stage 1: Builder ──────────────────────────────────────────
+# Full node image used only for installing deps and running tests
+FROM node:12.2.0-alpine AS builder
+
+# Working directory inside the builder stage
+WORKDIR /node
+
+# Copy package files first (layer caching trick — npm install
+# only re-runs when package.json changes, not on every code change)
+COPY package*.json ./
+
+# Install all dependencies including devDependencies (needed for tests)
+RUN npm install
+
+# Copy rest of the source code
+COPY . .
+
+# Run tests in builder stage — if tests fail, build stops here
+RUN npm run test
+
+
+# ── Stage 2: Production ───────────────────────────────────────
+# Fresh alpine image — nothing from builder stage carries over
+# except what we explicitly COPY
+FROM node:12.2.0-alpine
+
+# Working directory in final image
+WORKDIR /node
+
+# Copy only package files
+COPY package*.json ./
+
+# Install ONLY production dependencies (no devDependencies)
+# This is the key size reduction — no test libs, no build tools
+RUN npm install --only=production
+
+# Copy app source from builder stage (not from your local machine)
+COPY --from=builder /node/app.js .
+COPY --from=builder /node/views ./views
+
+# Expose app port
+EXPOSE 8000
+
+# Start the app
+CMD ["node", "app.js"]
+```
+
+### Step 7 — Create ECR Repository
 
 ```bash
 aws ecr create-repository \
@@ -165,7 +227,7 @@ aws ecr create-repository \
   --region ap-south-1
 ```
 
-### Step 7 — Authenticate Docker to ECR
+### Step 8 — Authenticate Docker to ECR
 
 ```bash
 aws ecr get-login-password --region ap-south-1 | \
@@ -173,7 +235,7 @@ aws ecr get-login-password --region ap-south-1 | \
   <your-account-id>.dkr.ecr.ap-south-1.amazonaws.com
 ```
 
-### Step 8 — Tag and Push Image to ECR
+### Step 9 — Tag and Push Image to ECR
 
 ```bash
 # Tag the image
@@ -185,7 +247,7 @@ docker push \
   <your-account-id>.dkr.ecr.ap-south-1.amazonaws.com/nodejs-todo-app:latest
 ```
 
-### Step 9 — Deploy on ECS Fargate
+### Step 10 — Deploy on ECS Fargate
 
 1. Go to **AWS Console → ECS → Create Cluster** → Select **Fargate**
 2. Create a **Task Definition**:
@@ -197,14 +259,14 @@ docker push \
 4. Under **Networking**, select your VPC and public subnets; enable **Auto-assign public IP**
 5. Click **Create Service** — ECS will pull the image from ECR and launch your container
 
-### Step 10 — Verify Deployment
+### Step 11 — Verify Deployment
 
 - Go to **ECS → Clusters → Your Cluster → Tasks**
 - Click on the running task → copy the **Public IP**
 - Open browser: `http://<public-ip>:8000`
 - You should see the **Todo List app** live ✅
 
-### Step 11 — Monitor with CloudWatch
+### Step 12 — Monitor with CloudWatch
 
 - Go to **CloudWatch → Log Groups**
 - Find the log group for your ECS task
@@ -212,38 +274,28 @@ docker push \
 
 ---
 
-## 🐳 Dockerfile
-
-```dockerfile
-FROM node:18-alpine
-
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm install
-
-COPY . .
-
-EXPOSE 8000
-
-CMD ["node", "app.js"]
-```
-
----
-
 ## 🖼️ Screenshots
 
 | Step | Screenshot |
 |------|------------|
-| ECR Repository with pushed image | *(add screenshot)* |
-| ECS Task in RUNNING state | *(add screenshot)* |
-| App live in browser via ECS public IP | *(add screenshot)* |
-| CloudWatch container logs | *(add screenshot)* |
-| IAM Role attached to EC2 | *(add screenshot)* |
+| Docker image size before vs after multi-stage build | *<img width="1117" height="234" alt="Screenshot (56)" src="https://github.com/user-attachments/assets/96c3addd-96e6-4a7d-8b5e-a54415046705" />
+* |
+| ECR Repository with pushed image | *<img width="1920" height="902" alt="Screenshot (57)" src="https://github.com/user-attachments/assets/d77277ff-a4fd-4f84-b839-bbb3bfdf4e07" />
+* |
+| ECS Task in RUNNING state | *<img width="1920" height="858" alt="Screenshot (58)" src="https://github.com/user-attachments/assets/188647eb-c8b3-4a22-b411-a8be3f15cd79" />
+* |
+| App live in browser via ECS public IP | *<img width="1920" height="1080" alt="Screenshot (59)" src="https://github.com/user-attachments/assets/c88cc1e1-46fd-4ebf-b584-242c9b0d851f" />
+* |
+| CloudWatch container logs | *<img width="1920" height="1080" alt="Screenshot (62)" src="https://github.com/user-attachments/assets/7a3096fb-344b-4fcf-8f67-b424ff22f143" />
+* |
+| IAM Role attached to EC2 | *<img width="1920" height="1080" alt="Screenshot (61)" src="https://github.com/user-attachments/assets/3112724c-7599-4a4f-bbc2-f6406942321b" />
+* |
 
 ---
 
 ## 🔑 Key Concepts Demonstrated
+
+**Multi-Stage Docker Builds** — The Dockerfile uses two stages: a builder stage that installs all dependencies and runs tests, and a production stage that starts fresh with only production dependencies. This keeps the final image lean, secure, and fast to pull.
 
 **IAM Role over Access Keys** — Instead of storing AWS credentials on the EC2 instance, an IAM Role is attached directly. EC2 automatically gets temporary credentials, which is the secure, production-grade approach.
 
